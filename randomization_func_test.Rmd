@@ -1,0 +1,332 @@
+---
+title: "randomization_func_test"
+author: "Tingchang Wang"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+# General setting
+We are randomizing 300 patients to two treatments(MIS, Open) controlling for 3 covariance
+
+* Lymph.node.status: N0, N1
+
+* Gleason grade group: Gleason score 7-8, Gleason score 9-10
+
+* Study Center: Center 1, Center 2, Center 3, Center 4, Center 5
+
+The randomization ratio for the two treatments is 2:1. All covariance are equally controlled to minimize the imbalance.
+
+```{r}
+library(shiny)
+library(tidyverse)
+library(stringr)
+library(glue)
+library(kableExtra)
+
+covariance <- c("Gleason.grade.group", "Lymph.node.status", "Center")
+title <- "Study title"
+ratio <- "2:1"
+weight <- "1:1:1"
+Treatment.col <- 'Treatment'
+pt_id <- 'id'
+output_dir <- "C:/Users/twang135/Study/JHU/biostatistician/research/shiny for minimization randomization/code"
+
+`Gleason.grade.group` <- c("Gleason score 7-8", "Gleason score 9-10")
+Lymph.node.status <- c("N0", "N1")
+Center <- c("Johns Hopkins Sidney Kimmel Comprehensive Cancer Center", 
+            "Northwestern Lurie Comprehensive Cancer Center", 
+            "University of Minnesota Masonic Cancer Center", 
+            "Mayo Clinic ")
+trt <- "Arm A: Enoblituzumab, Arm B: SOC"
+
+randomize = function(input, imbalance_score){
+  
+  # Convert the input to a single row record. The record should have all the covariance
+  # The treatment assignment will be added as Treatment.
+  unrandomized_pt <- as.data.frame(input)
+  unrandomized_pt[, Treatment.col] <- NA
+  # Find all randomized patients. The object folder should have a file 
+  # end with 'all_patients.csv'. The file stores all randomized patients.
+  # If there is no such file (1st time use), create one
+  all_pt_file <- grep("all_patients.csv", list.files(output_dir), value = TRUE)
+  if(length(all_pt_file) > 0){
+    randomized_pt <- read.csv(all_pt_file, sep = ',', header = TRUE)
+    # Check whether the patient has been randomized
+    if(unrandomized_pt[, pt_id] %in% randomized_pt[, pt_id]){
+      info <- paste0("Patient ", unrandomized_pt[, pt_id], " has been randomized.")
+      return(info)
+    }
+  }else{
+    all_pt_file = paste0(output_dir, '/', title, "-all_patients.csv")
+    write.table(unrandomized_pt[-1, ], file = all_pt_file, sep = ',', col.names = TRUE)
+    randomized_pt <- unrandomized_pt[-1, ]
+  }
+  
+
+  
+  # Combine the old and the new
+  if(nrow(randomized_pt) == 0){
+    data <- unrandomized_pt
+  }else{
+    data <- rbind(randomized_pt, unrandomized_pt)
+  }
+  
+  data <- data[!duplicated(data[, pt_id]), ]
+  # Split the treatment
+  trt = str_split(trt, ",")[[1]]
+  trt <- trimws(trt)
+  ntrt = length(trt)
+  
+  # Split ratio and weight, normalize
+  ratio <- str_split(ratio, ":")[[1]]
+  ratio <- as.numeric(trimws(ratio))
+  ratio <- ratio/ratio[1]
+  
+  weight <- str_split(weight, ":")[[1]]
+  weight <- as.numeric(trimws(weight))
+  weight <- weight/weight[1]
+  names(weight) <- covariance
+  
+  n.cov = length(covariance)
+  
+  
+  # Randomize the new patient
+  which.patient <- which(is.na(data[,Treatment.col]))
+  
+  dynamic_seed <- as.numeric(gsub("\\D", "", data[which.patient, pt_id]))
+  dynamic_seed <- ifelse(is.na(dynamic_seed), nrow(randomized_pt), dynamic_seed)
+  if (is.na(data[1,Treatment.col])){
+    set.seed(dynamic_seed)
+    data[1, Treatment.col] = sample(trt, 1, prob = ratio)
+  } else{
+    
+    data.randomized.patients <- data[which(!is.na(data[,Treatment.col])),]
+    total.sum.for.treatment <- rep(0, ntrt)
+    names(total.sum.for.treatment) <- trt
+    
+    # number of the same covariance with the new patient in each trt.
+    for(i in covariance){
+      for (j in trt) {
+        sum.for.treatment <- sum(
+          data.randomized.patients[data.randomized.patients[, Treatment.col]==j,i]==data[which.patient,i])
+        total.sum.for.treatment[j] <- total.sum.for.treatment[j] + sum.for.treatment * weight[i]
+      }
+    }
+    total.sum.for.treatment = total.sum.for.treatment/ratio
+    imbalance_score = rbind(imbalance_score, total.sum.for.treatment)
+
+    if(sum(!is.na(total.sum.for.treatment))==0 ){ 
+      return("Error: New Patient with Incomplete Data") 
+    }else if(length(unique(total.sum.for.treatment))==1 ){
+      #if there is no imbalance
+      set.seed(dynamic_seed)
+      data[which.patient, Treatment.col] = sample(trt, 1, prob = ratio)
+      
+    }else {
+      # if there is imbalance, select the minimum treatments and randomize
+      alpha <- sd(total.sum.for.treatment)
+      imbalance <- (total.sum.for.treatment == min(total.sum.for.treatment))
+      imbalance_mintrt <- names(total.sum.for.treatment)[imbalance]
+      imbalance_othertrt <- names(total.sum.for.treatment)[!imbalance]
+      set.seed(dynamic_seed)
+      # min_or_max decide whether to assign minimum treatment, 1 = Yes
+      min_or_max <- rbinom(1,1,(1-.5*(.5^alpha)))==1
+      if(min_or_max){
+        data[which.patient, Treatment.col] = sample(imbalance_mintrt, 1)
+      }else{
+        data[which.patient, Treatment.col] = sample(imbalance_othertrt, 1)
+      }
+      
+    }
+    
+  }
+  # Save the randomized patient with previous ones
+  write.table(data, all_pt_file, na='NA', row.names = FALSE, sep = ',')
+  # Save the randomized patient as random table
+  randtable = data[data[, pt_id] %in% unrandomized_pt[, pt_id],]
+  return(list(randtable, imbalance_score))
+}
+
+
+n_pt = 800
+imbalance_score <- NULL
+# covmat is for minirand package
+covmat1 = NULL
+
+for (i in 1:n_pt) {
+  set.seed(12455+i)
+  input = list(`id` = paste0('JH', i, 'test'),
+               `Gleason.grade.group` = 
+                 sample(`Gleason.grade.group`, 1, 
+                        prob = c(0.8, 0.2)),
+               `Lymph.node.status` = sample(Lymph.node.status, 1, 
+                               prob = c(0.7, 0.3)),
+               `Center` = sample(Center, 1, 
+                                 prob = c(0.4, 0.2, 0.2, 0.1))
+               )
+  covmat1 = rbind(covmat1, unlist(input))
+  res = randomize(input, imbalance_score)
+  randtable = res[[1]]
+  imbalance_score = res[[2]]
+}
+
+
+all_randomized <- read.csv(grep("all_patients.csv", list.files(output_dir), value = TRUE))
+
+```
+
+
+```{r}
+performance <- function(all_randomized = all_randomized, n_pt){
+  all_randomized_num <- all_randomized[1:n_pt, ]
+
+  print(table(all_randomized_num$Treatment, all_randomized_num$Gleason.grade.group))
+  print(table(all_randomized_num$Treatment, all_randomized_num$Lymph.node.status))
+  print(table(all_randomized_num$Treatment, all_randomized_num$Center))
+
+}
+```
+
+
+```{r}
+patientlist <- read_csv("Study title-all_patients.csv")
+patientlist %<>% 
+  filter(!is.na(Treatment))
+
+
+##############################################################################################################
+
+df = data.frame(x = 1:nrow(patientlist), 
+                ArmA = cumsum(patientlist$Treatment == "Arm A: Enoblituzumab"),
+                ArmB = cumsum(patientlist$Treatment == "Arm B: SOC")
+)
+
+
+ggplot(data = df, aes(x = x)) +
+  geom_line(aes(y = ArmA, color = 'Arm A: Enoblituzumab')) +
+  geom_line(aes(y = ArmB, color = 'Arm B: SOC')) +
+  scale_color_manual('Arm', values = c('red', 'blue')) +
+  labs(x = 'number of patient', y = 'number of treatment')
+
+##############################################################################################
+scramblematch<-function(query,target) {
+  Reduce("&",lapply(strsplit(query," ")[[1]],grepl,target,fixed=TRUE))
+}
+
+
+# "Arm A: Enoblituzumab" "Arm B: SOC"
+performance <- function(patientlist = patientlist, n_pt, Arm = "Arm A: Enoblituzumab"){
+  all_randomized_num <- patientlist[1:n_pt, ] %>% 
+    filter(Treatment == Arm)
+  
+  Gleason78 = scramblematch("7-8", all_randomized_num$Gleason.grade.group) %>% sum()
+  Gleason910 = scramblematch("9-10", all_randomized_num$Gleason.grade.group) %>% sum()
+  N0 = scramblematch("N0", all_randomized_num$Lymph.node.status) %>% sum()
+  N1 = scramblematch("N1", all_randomized_num$Lymph.node.status) %>% sum()
+  JHU = scramblematch("Johns Hopkins", all_randomized_num$Center) %>% sum()
+  Mayo = scramblematch("Mayo", all_randomized_num$Center) %>% sum()
+  Minnesota = scramblematch("Minnesota", all_randomized_num$Center) %>% sum()
+  Northwestern = scramblematch("Northwestern", all_randomized_num$Center) %>% sum()
+  
+  print(list(Gleason = c(Gleason78, Gleason910),
+             LN = c(N0, N1),
+             Center = c(JHU, Mayo, Minnesota, Northwestern)))
+}
+
+
+#################################################################################
+performance(patientlist, n_pt = 200, Arm = "Arm A: Enoblituzumab")
+performance(patientlist, n_pt = 200, Arm = "Arm B: SOC")
+
+performance(patientlist, n_pt = 400, Arm = "Arm A: Enoblituzumab")
+performance(patientlist, n_pt = 400, Arm = "Arm B: SOC")
+
+performance(patientlist, n_pt = 600, Arm = "Arm A: Enoblituzumab")
+performance(patientlist, n_pt = 600, Arm = "Arm B: SOC")
+
+performance(patientlist, n_pt = 800, Arm = "Arm A: Enoblituzumab")
+performance(patientlist, n_pt = 800, Arm = "Arm B: SOC")
+
+#########################################################################################
+imbalance_score_armA = data.frame( Gleason78 = 0,
+                                   Gleason910 = 0,
+                                   N0 = 0,
+                                   N1 = 0,
+                                   JHU = 0,
+                                   Mayo = 0,
+                                   Minnesota = 0,
+                                   Northwestern = 0,
+                                   score = 0)
+
+imbalance_score_armB = data.frame( Gleason78 = 0,
+                                   Gleason910 = 0,
+                                   N0 = 0,
+                                   N1 = 0,
+                                   JHU = 0,
+                                   Mayo = 0,
+                                   Minnesota = 0,
+                                   Northwestern = 0,
+                                   score = 0)
+
+Gleason78 = scramblematch("7-8", patientlist$Gleason.grade.group)
+Gleason910 = scramblematch("9-10", patientlist$Gleason.grade.group)
+N0 = scramblematch("N0", patientlist$Lymph.node.status)
+N1 = scramblematch("N1", patientlist$Lymph.node.status)
+JHU = scramblematch("Johns Hopkins", patientlist$Center)
+Mayo = scramblematch("Mayo", patientlist$Center)
+Minnesota = scramblematch("Minnesota", patientlist$Center)
+Northwestern = scramblematch("Northwestern", patientlist$Center)
+
+n_pt = nrow(patientlist)
+patient_info = data.frame(ID = patientlist$id,
+                          Gleason78, Gleason910, 
+                          N0, N1, 
+                          JHU, Mayo, Minnesota, Northwestern,
+                          Arm = patientlist$Treatment,
+                          scoreA = rep(0, n_pt),
+                          scoreB = rep(0, n_pt))
+
+
+#################################################################################
+
+for (i in 1:(n_pt-1)) {
+  randomized = patient_info[(i+1):n_pt, ]
+  
+  randomized_armA = randomized %>% 
+    filter(Arm == "Arm A: Enoblituzumab") %>% 
+    select(grep(TRUE, patient_info[i,]))
+  patient_info[i, 'scoreA'] = sum(randomized_armA)/2
+  
+  randomized_armB = randomized %>% 
+    filter(Arm == "Arm B: SOC") %>% 
+    select(grep(TRUE, patient_info[i,]))
+  patient_info[i, 'scoreB'] = sum(randomized_armB)
+}
+
+criteria = data.frame(ID = patient_info$ID,
+                      scoreA = patient_info$scoreA,
+                      scoreB = patient_info$scoreB,
+                      Arm = patient_info$Arm == "Arm B: SOC", 
+                      `Arm B?` = patient_info$scoreA >= patient_info$scoreB)
+
+criteria$agree = criteria$Arm == criteria$Arm.B.
+criteria$alpha = apply(criteria[, 2:3], 1, var)
+
+#####################################################################################
+print(mean(criteria$agree))
+
+criteria %>% 
+  filter(!agree) %>% 
+  filter(alpha > 10)
+  View()
+
+```
+
